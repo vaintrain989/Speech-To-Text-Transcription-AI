@@ -1,1 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>In-Browser AI Video Transcriber</title>
+    <!-- Tailwind CSS for clean UI -->
+    <script src="https://tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center p-6">
 
+    <div class="max-w-3xl w-full bg-gray-800 p-8 rounded-xl shadow-2xl space-y-6">
+        <header class="text-center">
+            <h1 class="text-3xl font-bold text-indigo-400">Local AI Video Transcriber</h1>
+            <p class="text-gray-400 text-sm mt-2">Transcribe local or remote videos directly in your browser using Hugging Face or Local models.</p>
+        </header>
+
+        <!-- Model Source & Configuration -->
+        <div class="bg-gray-700 p-4 rounded-lg space-y-4">
+            <div class="flex justify-between items-center">
+                <label class="block text-sm font-medium text-gray-300">1. Select Model Source</label>
+                <div class="flex items-center space-x-2 bg-gray-800 p-1.5 rounded-lg border border-gray-600">
+                    <button id="src-hf" class="bg-indigo-600 text-white text-xs font-semibold px-3 py-1 rounded transition">Hugging Face CDN</button>
+                    <button id="src-local" class="text-gray-400 text-xs font-semibold px-3 py-1 rounded transition">Local Disk/Folder</button>
+                </div>
+            </div>
+
+            <!-- Panel A: Hugging Face Selection -->
+            <div id="panel-hf" class="space-y-2">
+                <select id="model-select" class="w-full bg-gray-800 text-white border border-gray-600 rounded p-2 focus:outline-none focus:border-indigo-500">
+                    <option value="Xenova/whisper-tiny.en">Whisper Tiny (English Only ~75MB) - Fastest</option>
+                    <option value="Xenova/whisper-tiny">Whisper Tiny (Multilingual ~75MB)</option>
+                    <option value="Xenova/whisper-base.en">Whisper Base (English Only ~145MB)</option>
+                </select>
+            </div>
+
+            <!-- Panel B: Local Directory path -->
+            <div id="panel-local" class="hidden space-y-2">
+                <p class="text-xs text-gray-400">Provide the relative folder path or local server URL holding your ONNX format files (containing config.json, model.onnx, etc.).</p>
+                <div class="grid grid-cols-3 gap-2">
+                    <input type="text" id="local-path" value="./models/" class="col-span-2 bg-gray-800 text-white border border-gray-600 rounded p-2 text-sm focus:outline-none">
+                    <input type="text" id="local-model-id" value="whisper-tiny" placeholder="Model folder name" class="bg-gray-800 text-white border border-gray-600 rounded p-2 text-sm focus:outline-none">
+                </div>
+            </div>
+
+            <div id="status-box" class="text-sm font-semibold text-yellow-400 mt-2">Status: Ready to load model</div>
+        </div>
+
+        <!-- Video Input Source -->
+        <div class="bg-gray-700 p-4 rounded-lg space-y-4">
+            <label class="block text-sm font-medium text-gray-300">2. Select Video Source</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="border border-dashed border-gray-500 p-4 rounded text-center hover:bg-gray-650 transition">
+                    <span class="block text-xs text-gray-400 mb-2">Upload Device File</span>
+                    <input type="file" id="video-file" accept="video/*" class="text-sm text-gray-300 block w-full file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-700">
+                </div>
+                <div class="border border-dashed border-gray-500 p-4 rounded flex flex-col justify-center">
+                    <span class="block text-xs text-gray-400 mb-2">Or Paste Video URL (Direct MP4/WebM)</span>
+                    <input type="url" id="video-url" placeholder="https://example.com" class="w-full bg-gray-800 text-white border border-gray-600 rounded p-2 text-sm focus:outline-none">
+                </div>
+            </div>
+        </div>
+
+        <video id="video-player" class="hidden" controls></video>
+        <button id="process-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 shadow-md">
+            Start Transcription
+        </button>
+
+        <!-- Transcription Output / SRT View -->
+        <div class="space-y-2">
+            <div class="flex justify-between items-center">
+                <label class="text-sm font-medium text-gray-300">SRT Subtitle Output</label>
+                <button id="download-btn" disabled class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 text-white text-xs font-bold py-1.5 px-3 rounded transition">
+                    Download .srt File
+                </button>
+            </div>
+            <textarea id="output-srt" readonly class="w-full h-64 bg-gray-900 border border-gray-700 rounded p-3 text-xs font-mono text-green-400 focus:outline-none" placeholder="Your generated SRT subtitles will appear here..."></textarea>
+        </div>
+    </div>
+
+    <script type="module">
+        import { pipeline, env } from 'https://jsdelivr.net';
+
+        const srcHfBtn = document.getElementById('src-hf');
+        const srcLocalBtn = document.getElementById('src-local');
+        const panelHf = document.getElementById('panel-hf');
+        const panelLocal = document.getElementById('panel-local');
+        
+        const modelSelect = document.getElementById('model-select');
+        const localPathInput = document.getElementById('local-path');
+        const localIdInput = document.getElementById('local-model-id');
+        
+        const statusBox = document.getElementById('status-box');
+        const videoFile = document.getElementById('video-file');
+        const videoUrl = document.getElementById('video-url');
+        const processBtn = document.getElementById('process-btn');
+        const outputSrt = document.getElementById('output-srt');
+        const downloadBtn = document.getElementById('download-btn');
+
+        let transcriber = null;
+        let srtData = "";
+        let useLocalMode = false;
+
+        // Toggle UI Panels & Mode
+        srcHfBtn.addEventListener('click', () => {
+            useLocalMode = false;
+            srcHfBtn.className = "bg-indigo-600 text-white text-xs font-semibold px-3 py-1 rounded transition";
+            srcLocalBtn.className = "text-gray-400 text-xs font-semibold px-3 py-1 rounded transition";
+            panelHf.classList.remove('hidden');
+            panelLocal.classList.add('hidden');
+            transcriber = null; // reset model pipeline to reload
+        });
+
+        srcLocalBtn.addEventListener('click', () => {
+            useLocalMode = true;
+            srcLocalBtn.className = "bg-indigo-600 text-white text-xs font-semibold px-3 py-1 rounded transition";
+            srcHfBtn.className = "text-gray-400 text-xs font-semibold px-3 py-1 rounded transition";
+            panelLocal.classList.remove('hidden');
+            panelHf.classList.add('hidden');
+            transcriber = null; // reset model pipeline to reload
+        });
+
+        async function extractAudioBuffer(audioUrl) {
+            statusBox.innerText = "Status: Extracting audio from video...";
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const response = await fetch(audioUrl);
+            const arrayBuffer = await response.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            return audioBuffer.getChannelData(0); 
+        }
+
+        function formatSRTTime(seconds) {
+            const date = new Date(0);
+            date.setSeconds(seconds);
+            const ms = Math.floor((seconds % 1) * 1000).toString().padStart(3, '0');
+            const timeString = date.toISOString().substr(11, 8);
+            return `${timeString},${ms}`;
+        }
+
+        function convertToSRT(chunks) {
+            return chunks.map((chunk, index) => {
+                const id = index + 1;
+                const start = formatSRTTime(chunk.timestamp[0]);
+                const end = formatSRTTime(chunk.timestamp[1] || chunk.timestamp[0] + 2);
+                return `${id}\n${start} --> ${end}\n${chunk.text.trim()}\n\n`;
+            }).join('');
+        }
+
+        processBtn.addEventListener('click', async () => {
+            try {
+                if (!transcriber) {
+                    let modelIdentifier = "";
+                    
+                    if (useLocalMode) {
+                        // Configuration targeting internal offline file assets
+                        env.allowLocalModels = true;
+                        env.allowRemoteModels = false;
+                        env.localModelPath = localPathInput.value; // e.g., "./models/"
+                        modelIdentifier = localIdInput.value;     // e.g., "whisper-tiny"
+                        statusBox.innerText = `Status: Loading offline model from ${env.localModelPath}${modelIdentifier}...`;
+                    } else {
+                        // Configuration targeting public Hugging Face files
+                        env.allowLocalModels = false;
+                        env.allowRemoteModels = true;
+                        modelIdentifier = modelSelect.value;
+                        statusBox.innerText = `Status: Downloading ${modelIdentifier} from HuggingFace...`;
+                    }
+
+                    processBtn.disabled = true;
+
+                    transcriber = await pipeline('automatic-speech-recognition', modelIdentifier, {
+                        device: 'webgpu',
+                        dataType: 'fp32',
+                        progress_callback: (progress) => {
+                            if (progress.status === 'progress') {
+                                statusBox.innerText = `Status: Fetching assets... ${Math.round(progress.loaded / progress.total * 100)}%`;
+                            }
+                        }
+                    });
+                }
+
+                let sourceUrl = "";
+                if (videoFile.files.length > 0) {
+                    sourceUrl = URL.createObjectURL(videoFile.files[0]);
+                } else if (videoUrl.value.trim() !== "") {
+                    sourceUrl = videoUrl.value.trim();
+                } else {
+                    alert("Please supply a video file or link configuration.");
+                    processBtn.disabled = false;
+                    return;
+                }
+
+                processBtn.disabled = true;
+                const audioData = await extractAudioBuffer(sourceUrl);
+                
+                statusBox.innerText = "Status: AI Model Transcribing via WebGPU...";
+                const result = await transcriber(audioData, {
+                    chunk_length_s: 30,
+                    stride_length_s: 5,
+                    return_timestamps: true
+                });
+
+                srtData = convertToSRT(result.chunks);
+                outputSrt.value = srtData;
+                
+                statusBox.innerText = "Status: Processing Complete!";
+                downloadBtn.disabled = false;
+                processBtn.disabled = false;
+
+            } catch (error) {
+                console.error(error);
+                statusBox.innerText = `Status: Execution failed - ${error.message}`;
+                processBtn.disabled = false;
+                transcriber = null;
+            }
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            if(!srtData) return;
+            const blob = new Blob([srtData], { type: 'text/srt;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.setAttribute("href", url);
+            link.setAttribute("download", "subtitles.srt");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
